@@ -1,9 +1,18 @@
 import streamlit as st
-from openai import OpenAI
+import google.generativeai as genai
 import os
 import PyPDF2
 import sqlite3
 import uuid
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure the Gemini API key from .env
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # ==========================
 # Database Functions (SQLite)
@@ -116,30 +125,19 @@ with st.sidebar:
     st.title("Settings")
     st.caption(f"Session ID: `{st.session_state.session_id[:8]}...`")
 
-    # --- NEW: User Input API Key ---
-    user_api_key = st.text_input(
-        "🔑 Enter Groq API Key", 
-        type="password", 
-        help="Get your free API key from https://console.groq.com/keys"
-    )
+    # --- API Key Status ---
+    if GEMINI_API_KEY:
+        st.success("Gemini API Key loaded from .env")
+    else:
+        st.error("GEMINI_API_KEY not found in .env file")
     
     st.divider()
 
     model = st.selectbox(
         "Choose Model",
         [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "llama3-70b-8192",
-            "llama3-8b-8192",
-            "gemma2-9b-it",
-            "deepseek-r1-distill-llama-70b",
-            "deepseek-r1-distill-qwen-32b",
-            "qwen/qwen3-32b",
-            "qwen/qwen3-14b",
-            "qwen/qwen3-8b",
-            "mistral-saba-24b",
-            "mixtral-8x7b-32768",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
         ],
     )
 
@@ -161,8 +159,8 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Document Upload (RAG) ---
-    st.subheader("Upload Document (RAG)")
+    # --- Document Upload  ---
+    st.subheader("Upload Document")
     uploaded_file = st.file_uploader("Upload a PDF or TXT file to chat with it.", type=["pdf", "txt"])
     
     document_context = ""
@@ -217,10 +215,10 @@ if not combined_system_prompt:
 # Main UI
 # ==========================
 st.title("AI Chatbot")
-st.caption("Powered by Groq API | Chat History saved to SQLite")
+st.caption("Powered by Google Gemini API | Chat History saved to SQLite")
 
-if not user_api_key:
-    st.warning("👈 Please enter your Groq API Key in the sidebar to start chatting.")
+if not GEMINI_API_KEY:
+    st.warning("Please add your GEMINI_API_KEY to the .env file to start chatting.")
 
 with st.expander("View Current System Prompt & Context"):
     st.text(combined_system_prompt)
@@ -253,13 +251,16 @@ for message in st.session_state.messages:
 # User Input
 # ==========================
 # The chat input is disabled if no API key is provided
-prompt = st.chat_input("Type your message...", disabled=not user_api_key)
+prompt = st.chat_input("Type your message...", disabled=not GEMINI_API_KEY)
 
-if prompt and user_api_key:
-    # Initialize Groq Client dynamically using the user's provided key
-    client = OpenAI(
-        api_key=user_api_key,
-        base_url="https://api.groq.com/openai/v1",
+if prompt and GEMINI_API_KEY:
+    # Initialize Gemini model
+    gemini_model = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=combined_system_prompt,
+        generation_config=genai.types.GenerationConfig(
+            temperature=temperature,
+        ),
     )
 
     # 1. Save User Message to Session State & DB
@@ -270,28 +271,31 @@ if prompt and user_api_key:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 3. Generate and Display Assistant Response
+    # 3. Build Gemini chat history (exclude system messages)
+    gemini_history = []
+    for msg in st.session_state.messages[:-1]:  # exclude the latest user message
+        if msg["role"] == "system":
+            continue
+        gemini_role = "user" if msg["role"] == "user" else "model"
+        gemini_history.append({"role": gemini_role, "parts": [msg["content"]]})
+
+    # 4. Generate and Display Assistant Response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
 
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=st.session_state.messages,
-                temperature=temperature,
-                stream=True,
-            )
+            chat = gemini_model.start_chat(history=gemini_history)
+            response = chat.send_message(prompt, stream=True)
 
             for chunk in response:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    full_response += delta
+                if chunk.text:
+                    full_response += chunk.text
                     placeholder.markdown(full_response + "▌")
 
             placeholder.markdown(full_response)
 
-            # 4. Save Assistant Message to Session State & DB
+            # 5. Save Assistant Message to Session State & DB
             st.session_state.messages.append({"role": "assistant", "content": full_response})
             save_message(st.session_state.session_id, "assistant", full_response)
 
