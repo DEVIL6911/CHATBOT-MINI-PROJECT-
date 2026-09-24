@@ -1,22 +1,33 @@
+# ==============================================================================
+# Step 1: Import Libraries
+# ==============================================================================
+import os
+import sqlite3
 import streamlit as st
 import google.generativeai as genai
-import os
-import PyPDF2
-import sqlite3
-import uuid
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# ==============================================================================
+# Step 2: Page Configuration
+# ==============================================================================
+# Must be the first Streamlit command executed
+st.set_page_config(
+    page_title="AI Chatbot",
+    layout="wide",
+)
+
+# ==============================================================================
+# Step 3: Load Environment Variables & Configure Gemini API
+# ==============================================================================
 load_dotenv()
 
-# Configure the Gemini API key from .env
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# ==========================
-# Database Functions (SQLite)
-# ==========================
+# ==============================================================================
+# Step 4: Database Functions (SQLite - Persistent Storage)
+# ==============================================================================
 DB_NAME = "chat_history.db"
 
 def init_db():
@@ -26,7 +37,6 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
             role TEXT,
             content TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -35,43 +45,42 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_message(session_id, role, content):
+def save_message(role, content):
     """Saves a single message to the database."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute(
-        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-        (session_id, role, content)
+        "INSERT INTO messages (role, content) VALUES (?, ?)",
+        (role, content)
     )
     conn.commit()
     conn.close()
 
-def load_messages(session_id):
-    """Loads all user and assistant messages for a specific session."""
+def load_messages():
+    """Loads all user and assistant messages in ascending order by timestamp."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute(
-        "SELECT role, content FROM messages WHERE session_id=? ORDER BY timestamp ASC", 
-        (session_id,)
+        "SELECT role, content FROM messages ORDER BY timestamp ASC"
     )
     rows = c.fetchall()
     conn.close()
     return [{"role": row[0], "content": row[1]} for row in rows]
 
-def clear_db_history(session_id):
-    """Deletes the chat history for a specific session from the database."""
+def clear_db_history():
+    """Deletes all messages from the database."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+    c.execute("DELETE FROM messages")
     conn.commit()
     conn.close()
 
-# Initialize the DB when the script runs
+# Initialize the database on startup
 init_db()
 
-# ==========================
-# System Prompts (Tones)
-# ==========================
+# ==============================================================================
+# Step 5: System Prompts (Chatbot Tones)
+# ==============================================================================
 TONE_PROMPTS = {
     "Default": "You are a helpful AI assistant.",
     "Friendly": "You are a friendly and cheerful assistant. Always be encouraging and supportive. Use simple language and a positive attitude.",
@@ -84,46 +93,11 @@ TONE_PROMPTS = {
     "Academic": "You are an academic scholar. Provide highly detailed, analytical, and well-researched answers using formal vocabulary."
 }
 
-# ==========================
-# Helper Function: Extract Text
-# ==========================
-def extract_text_from_file(uploaded_file):
-    """Extracts text from TXT or PDF files."""
-    text = ""
-    try:
-        if uploaded_file.type == "text/plain":
-            text = str(uploaded_file.read(), "utf-8")
-        elif uploaded_file.type == "application/pdf":
-            reader = PyPDF2.PdfReader(uploaded_file)
-            for page in reader.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text += extracted + "\n"
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-    return text
-
-# ==========================
-# Page Configuration
-# ==========================
-st.set_page_config(
-    page_title="AI Chatbot",
-    layout="wide",
-)
-
-# ==========================
-# Session Management
-# ==========================
-# Generate a unique session ID for the user's current browser tab
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
-
-# ==========================
-# Sidebar
-# ==========================
+# ==============================================================================
+# Step 6: Sidebar Settings & Controls
+# ==============================================================================
 with st.sidebar:
     st.title("Settings")
-    st.caption(f"Session ID: `{st.session_state.session_id[:8]}...`")
 
     # --- API Key Status ---
     if GEMINI_API_KEY:
@@ -137,7 +111,7 @@ with st.sidebar:
         "Choose Model",
         [
             "gemini-3.6-flash",
-            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash-lite",   
         ],
     )
 
@@ -159,17 +133,15 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Document Upload  ---
-    st.subheader("Upload Document")
-    uploaded_file = st.file_uploader("Upload a PDF or TXT file to chat with it.", type=["pdf", "txt"])
+    # --- Direct Document Upload (Passed directly to Gemini without extraction) ---
+    st.subheader("Upload Document (PDF / TXT)")
+    uploaded_file = st.file_uploader(
+        "Upload a PDF or TXT file",
+        type=["pdf", "txt"]
+    )
     
-    document_context = ""
     if uploaded_file is not None:
-        with st.spinner("Extracting text..."):
-            document_context = extract_text_from_file(uploaded_file)
-            if len(document_context) > 40000:
-                document_context = document_context[:40000] + "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
-            st.success("Document loaded successfully!")
+        st.success(f"File `{uploaded_file.name}` ready to send directly to LLM!")
 
     st.divider()
 
@@ -182,13 +154,13 @@ with st.sidebar:
     )
 
     if st.button("Clear Chat"):
-        clear_db_history(st.session_state.session_id)
+        clear_db_history()
         st.session_state.messages = []
         st.rerun()
 
-# ==========================
-# Build the Final System Prompt
-# ==========================
+# ==============================================================================
+# Step 7: Build the Final System Prompt
+# ==============================================================================
 active_prompts = []
 
 for tone in selected_tones:
@@ -197,38 +169,33 @@ for tone in selected_tones:
 if custom_system_prompt.strip():
     active_prompts.append(f"Additional Instructions from user:\n{custom_system_prompt.strip()}")
 
-if document_context.strip():
+if uploaded_file is not None:
     active_prompts.append(
-        "--- DOCUMENT CONTEXT ---\n"
-        "Use the information provided in the document below to answer the user's questions. "
-        "If the answer is not contained within this document, you may use your general knowledge, "
-        "but prioritize the document's information.\n\n"
-        f"{document_context}\n"
-        "------------------------"
+        "A document has been attached to the conversation. Prioritize information from this document when answering."
     )
 
 combined_system_prompt = "\n\n".join(active_prompts)
 if not combined_system_prompt:
     combined_system_prompt = "You are a helpful AI assistant."
 
-# ==========================
-# Main UI
-# ==========================
+# ==============================================================================
+# Step 8: Main UI Header
+# ==============================================================================
 st.title("AI Chatbot")
-st.caption("Powered by Google Gemini API | Chat History saved to SQLite")
+st.caption("Powered by Google Gemini API (Multimodal) | Chat History saved to SQLite")
 
 if not GEMINI_API_KEY:
     st.warning("Please add your GEMINI_API_KEY to the .env file to start chatting.")
 
-with st.expander("View Current System Prompt & Context"):
+with st.expander("View Current System Prompt & Instructions"):
     st.text(combined_system_prompt)
 
-# ==========================
-# Session State & DB Loading
-# ==========================
+# ==============================================================================
+# Step 9: Load & Display Chat History
+# ==============================================================================
 if "messages" not in st.session_state or len(st.session_state.messages) == 0:
-    # Load past messages from database for this session
-    db_history = load_messages(st.session_state.session_id)
+    # Load past messages from database in ascending order
+    db_history = load_messages()
     
     # Initialize session state with the system prompt followed by DB history
     st.session_state.messages = [
@@ -239,17 +206,15 @@ else:
     if st.session_state.messages[0]["role"] == "system":
         st.session_state.messages[0]["content"] = combined_system_prompt
 
-# ==========================
-# Display Chat History
-# ==========================
+# Display all messages in ascending chronological order
 for message in st.session_state.messages:
     if message["role"] != "system":
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-# ==========================
-# User Input
-# ==========================
+# ==============================================================================
+# Step 10: Handle User Input & Direct Multimodal LLM Streaming
+# ==============================================================================
 # The chat input is disabled if no API key is provided
 prompt = st.chat_input("Type your message...", disabled=not GEMINI_API_KEY)
 
@@ -264,12 +229,13 @@ if prompt and GEMINI_API_KEY:
     )
 
     # 1. Save User Message to Session State & DB
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    save_message(st.session_state.session_id, "user", prompt)
+    display_user_text = f"📎 *[Attached: {uploaded_file.name}]*\n\n{prompt}" if uploaded_file else prompt
+    st.session_state.messages.append({"role": "user", "content": display_user_text})
+    save_message("user", display_user_text)
 
     # 2. Display user message
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(display_user_text)
 
     # 3. Build Gemini chat history (exclude system messages)
     gemini_history = []
@@ -279,14 +245,25 @@ if prompt and GEMINI_API_KEY:
         gemini_role = "user" if msg["role"] == "user" else "model"
         gemini_history.append({"role": gemini_role, "parts": [msg["content"]]})
 
-    # 4. Generate and Display Assistant Response
+    # 4. Prepare message content: pass file directly to Gemini if attached
+    if uploaded_file is not None:
+        file_mime = uploaded_file.type or ("application/pdf" if uploaded_file.name.endswith(".pdf") else "text/plain")
+        file_part = {
+            "mime_type": file_mime,
+            "data": uploaded_file.getvalue()
+        }
+        message_to_send = [file_part, prompt]
+    else:
+        message_to_send = prompt
+
+    # 5. Generate and Display Assistant Response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
 
         try:
             chat = gemini_model.start_chat(history=gemini_history)
-            response = chat.send_message(prompt, stream=True)
+            response = chat.send_message(message_to_send, stream=True)
 
             for chunk in response:
                 if chunk.text:
@@ -295,9 +272,9 @@ if prompt and GEMINI_API_KEY:
 
             placeholder.markdown(full_response)
 
-            # 5. Save Assistant Message to Session State & DB
+            # 6. Save Assistant Message to Session State & DB
             st.session_state.messages.append({"role": "assistant", "content": full_response})
-            save_message(st.session_state.session_id, "assistant", full_response)
+            save_message("assistant", full_response)
 
         except Exception as e:
             st.error(f"Error: {e}")
